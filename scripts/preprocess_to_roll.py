@@ -10,8 +10,8 @@ import os
 import json
 import numpy as np
 
-INPUT_DIR = "data/extracted/Classical"
-OUTPUT_DIR = "data/processed/Classical"
+INPUT_DIR = "../data/extracted/Classical"
+OUTPUT_DIR = "../data/processed/Classical"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 전처리 하이퍼파라미터
