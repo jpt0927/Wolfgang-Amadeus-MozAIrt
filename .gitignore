@@ -1,3 +1,53 @@
 .venv/
 
 data/
+
+# OS 및 시스템 파일
+.DS_Store
+Thumbs.db
+
+# 로그 파일
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 에디터 설정 파일
+.vscode/
+.idea/
+
+# 환경 변수 파일 (공통)
+.env
+
+---
+# ## Frontend (mozairt) 규칙 ##
+
+# 의존성 폴더
+mozairt/node_modules/
+
+# Next.js 빌드 및 캐시 폴더
+mozairt/.next/
+mozairt/out/
+
+# 프론트엔드 환경 변수 파일
+mozairt/.env.local
+mozairt/.env.development.local
+mozairt/.env.production.local
+mozairt/.env.test.local
+
+---
+# ## Backend (backend) 규칙 ##
+
+# 파이썬 가상환경 폴더
+backend/venv/
+backend/.venv/
+
+# 파이썬 캐시 파일 (모든 하위 폴더 포함)
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 백엔드 환경 변수 파일
+backend/.env
