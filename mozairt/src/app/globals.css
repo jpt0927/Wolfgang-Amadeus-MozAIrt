@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 기존 body 스타일을 지우고 아래 코드로 교체합니다.
+*/
+@layer base {
+  body {
+    @apply font-sans text-white;
+    background-color: #000;
+    background-image: 
+      /* 1. 가장 작은 별 (가장 빠름) */
+      url("https://www.transparenttextures.com/patterns/stardust.png"),
+      /* 2. 중간 크기 별 (중간 속도) */
+      radial-gradient(ellipse at center, rgba(255,255,255,0.1) 0%, rgba(0,0,0,0) 60%),
+      /* 3. 가장 큰 별 (느림) & 성운 효과 */
+      radial-gradient(ellipse at top left, rgba(169, 113, 229, 0.2) 0%, rgba(0,0,0,0) 50%),
+      radial-gradient(ellipse at bottom right, rgba(67, 135, 229, 0.2) 0%, rgba(0,0,0,0) 50%);
+    background-repeat: repeat, no-repeat, no-repeat, no-repeat;
+    background-attachment: fixed; /* 배경 이미지를 뷰포트에 고정 */
+    
+    /* 애니메이션 적용 */
+    animation: 
+      move-stars 200s linear infinite,
+      move-nebula 300s linear infinite;
+  }
+}
+
+/* 별들이 움직이는 애니메이션 */
+@keyframes move-stars {
+  from { background-position: 0 0; }
+  to { background-position: -10000px 5000px; }
+}
+
+/* 성운이 천천히 움직이는 애니메이션 */
+@keyframes move-nebula {
+    from { background-position: 0% 0%; }
+    to { background-position: 100% 100%; }
+}
+
+
+/* MIDI 플레이어 스타일 커스텀 */
+midi-player {
+  width: 100%;
+  --main-color: #6366f1;
+  --secondary-color: #374151;
+}
+
+
+/* 음표 클릭 효과 스타일 및 애니메이션 */
+.music-note-fx {
+  position: fixed; /* 화면 기준으로 위치 고정 */
+  z-index: 9999;
+  font-size: 2rem; /* 음표 크기 */
+  user-select: none; /* 텍스트 선택 방지 */
+  pointer-events: none; /* 클릭 이벤트 통과 */
+  
+  /* 애니메이션 적용 */
+  animation: fade-and-rise 2s ease-out forwards;
+}
+
+@keyframes fade-and-rise {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) translateY(-60px); /* 위로 60px 이동 */
+  }
+}
