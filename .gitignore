@@ -1,5 +1,7 @@
 .venv/
 
+my_new_env/
+
 data/
 
 # OS 및 시스템 파일

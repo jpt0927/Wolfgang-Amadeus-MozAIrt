@@ -4,8 +4,8 @@ import numpy as np
 import sys
 import gc  # Garbage Collection 라이브러리
 
-INPUT_DIR = "../data/extracted/Rock_Pop"
-OUTPUT_DIR = "../data/processed/Rock_Pop"
+INPUT_DIR = "data/extracted/Classical"
+OUTPUT_DIR = "data/processed/Classical"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 TIME_RESOLUTION = 0.05  # 50ms 단위 (20 steps/sec)
