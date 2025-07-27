@@ -17,20 +17,21 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 TIME_RESOLUTION = 0.05
 LATENT_DIM = 32
 BATCH_SIZE = 64
-EPOCHS = 50
+EPOCHS = 20
 LEARNING_RATE = 1e-3
 SEQUENCE_LENGTH = 200
 
 # 데이터셋/출력 경로 태그
-DATASET_TAG = "Country"
+DATASET_TAG = "Electronic_Dance_SynthPop"
 DATA_DIR = ROOT_DIR / "data" / "processed" / DATASET_TAG
 OUTPUT_DIR = ROOT_DIR / "outputs" / DATASET_TAG
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-CHECKPOINT_PATH = OUTPUT_DIR / f"vae_{DATASET_TAG}.weights.h5"
-VAE_SAVE_PATH   = OUTPUT_DIR / f"vae_{DATASET_TAG}.h5"
-ENC_SAVE_PATH   = OUTPUT_DIR / f"encoder_{DATASET_TAG}.h5"
-DEC_SAVE_PATH   = OUTPUT_DIR / f"decoder_{DATASET_TAG}.h5"
+# 파일 경로(이름)에 epochs 포함
+CHECKPOINT_PATH = OUTPUT_DIR / f"vae_{DATASET_TAG}_E{EPOCHS}.weights.h5"
+VAE_SAVE_PATH   = OUTPUT_DIR / f"vae_{DATASET_TAG}_E{EPOCHS}.h5"
+ENC_SAVE_PATH   = OUTPUT_DIR / f"encoder_{DATASET_TAG}_E{EPOCHS}.h5"
+DEC_SAVE_PATH   = OUTPUT_DIR / f"decoder_{DATASET_TAG}_E{EPOCHS}.h5"
 
 # ======================================
 # GPU 설정
@@ -180,9 +181,9 @@ checkpoint_callback = ModelCheckpoint(
 )
 
 # 재시작 시 체크포인트 로드
-if CHECKPOINT_PATH.exists():
-    print(f"[INFO] Load checkpoint weights: {CHECKPOINT_PATH}")
-    vae.load_weights(str(CHECKPOINT_PATH))
+# if CHECKPOINT_PATH.exists():
+#     print(f"[INFO] Load checkpoint weights: {CHECKPOINT_PATH}")
+#     vae.load_weights(str(CHECKPOINT_PATH))
 
 # ======================================
 # 학습
