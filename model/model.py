@@ -4,159 +4,212 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import ModelCheckpoint, LambdaCallback
-import gc  # Garbage Collection 라이브러리
+from tensorflow.keras import mixed_precision
+from pathlib import Path
+
+# ======================================
+# 전역 설정
+# ======================================
+mixed_precision.set_global_policy("mixed_float16")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 # 하이퍼파라미터
-TIME_RESOLUTION = 0.05  # 50ms 단위 (20 steps/sec)
-LATENT_DIM = 32  # 잠재 공간 차원
+TIME_RESOLUTION = 0.05
+LATENT_DIM = 32
 BATCH_SIZE = 64
 EPOCHS = 50
 LEARNING_RATE = 1e-3
-SEQUENCE_LENGTH = 200  # 예시로 200 타임스텝 설정
+SEQUENCE_LENGTH = 200
 
-# GPU 설정: TensorFlow가 GPU를 자동으로 인식하므로 설정 필요
-physical_devices = tf.config.list_physical_devices('GPU')
-if len(physical_devices) > 0:
-    tf.config.set_visible_devices(physical_devices[0], 'GPU')  # 첫 번째 GPU 선택
-    tf.config.experimental.set_memory_growth(physical_devices[0], True)  # 메모리 증가 설정
+# 데이터셋/출력 경로 태그
+DATASET_TAG = "Country"
+DATA_DIR = ROOT_DIR / "data" / "processed" / DATASET_TAG
+OUTPUT_DIR = ROOT_DIR / "outputs" / DATASET_TAG
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# 피아노 롤 데이터 로딩 (슬라이딩 윈도우 적용)
-def load_data(input_dir="data/processed/Classical", seq_length=200, step=100):
-    """피아노 롤 데이터를 불러와서 슬라이딩 윈도우로 시퀀스 생성"""
-    files = [f for f in os.listdir(input_dir) if f.endswith(".npz")]
+CHECKPOINT_PATH = OUTPUT_DIR / f"vae_{DATASET_TAG}.weights.h5"
+VAE_SAVE_PATH   = OUTPUT_DIR / f"vae_{DATASET_TAG}.h5"
+ENC_SAVE_PATH   = OUTPUT_DIR / f"encoder_{DATASET_TAG}.h5"
+DEC_SAVE_PATH   = OUTPUT_DIR / f"decoder_{DATASET_TAG}.h5"
+
+# ======================================
+# GPU 설정
+# ======================================
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    tf.config.set_visible_devices(gpus[0], 'GPU')
+    tf.config.experimental.set_memory_growth(gpus[0], True)
+
+# ======================================
+# 데이터 로딩 (슬라이딩 윈도우)
+# ======================================
+def load_data(input_dir=DATA_DIR, seq_length=SEQUENCE_LENGTH, step=100):
+    """
+    .npz 파일의 'roll' 배열(T,128)을 읽어 (N, seq_length, 128) 시퀀스 생성.
+    """
+    input_dir = Path(input_dir)
+    if not input_dir.is_dir():
+        raise FileNotFoundError(f"Data directory not found: {input_dir}")
+
+    files = sorted(input_dir.glob("*.npz"))
+    if not files:
+        raise RuntimeError(f"No .npz files in {input_dir}")
+
     sequences = []
-    
-    for file in files:
-        file_path = os.path.join(input_dir, file)
+    for fp in files:
         try:
-            with np.load(file_path) as npz_file:
-                roll = npz_file['roll']
-                
-                # 시퀀스 길이보다 짧은 롤은 무시
-                if roll.shape[0] < seq_length:
+            with np.load(fp) as npz_file:
+                if "roll" not in npz_file:
+                    print(f"[WARN] 'roll' key not found in {fp.name}, skip.")
                     continue
-                    
-                # 슬라이딩 윈도우로 시퀀스 생성
-                for i in range(0, roll.shape[0] - seq_length + 1, step):
-                    seq = roll[i:i + seq_length]
-                    sequences.append(seq)
+                roll = npz_file["roll"].astype(np.float32)
+
+                if roll.ndim != 2 or roll.shape[1] != 128:
+                    print(f"[WARN] Unexpected roll shape {roll.shape} in {fp.name}, skip.")
+                    continue
+
+                T = roll.shape[0]
+                if T < seq_length:
+                    continue
+
+                for i in range(0, T - seq_length + 1, step):
+                    sequences.append(roll[i:i + seq_length])
+
         except Exception as e:
-            print(f"Error loading or processing file {file}: {e}")
+            print(f"[WARN] Error reading {fp.name}: {e}")
 
-    return np.array(sequences)
+    if not sequences:
+        raise RuntimeError(
+            f"No sequences produced. Check seq_length={seq_length}, step={step}, and data in {input_dir}"
+        )
 
-# VAE 인코더
+    return np.stack(sequences, dtype=np.float32)
+
+# ======================================
+# VAE 구성요소
+# ======================================
+class Sampling(layers.Layer):
+    """Reparameterization + KL(add_loss)"""
+    def call(self, inputs):
+        z_mean, z_log_var = inputs
+        # 손실 안정성을 위해 float32에서 계산
+        zm32 = tf.cast(z_mean, tf.float32)
+        zv32 = tf.cast(z_log_var, tf.float32)
+        eps  = tf.random.normal(tf.shape(zm32), dtype=tf.float32)
+        z32  = zm32 + tf.exp(0.5 * zv32) * eps
+
+        # KL loss 추가
+        kl = -0.5 * tf.reduce_mean(
+            tf.reduce_sum(1.0 + zv32 - tf.square(zm32) - tf.exp(zv32), axis=-1)
+        )
+        self.add_loss(kl)
+
+        # 정책 dtype으로 캐스팅해 반환
+        return tf.cast(z32, z_mean.dtype)
+
 def build_encoder(input_shape, latent_dim):
-    """VAE 인코더 모델"""
     inputs = layers.Input(shape=input_shape)
-    
     x = layers.LSTM(128, return_sequences=True)(inputs)
     x = layers.LSTM(64)(x)
-
-    # 잠재 공간에 대한 평균(mean)과 표준편차(standard deviation)
     z_mean = layers.Dense(latent_dim)(x)
     z_log_var = layers.Dense(latent_dim)(x)
-
-    # z_mean과 z_log_var를 이용해 잠재 공간 샘플링
-    z = layers.Lambda(sampling, output_shape=(latent_dim,))([z_mean, z_log_var])
-    
-    encoder = models.Model(inputs, [z_mean, z_log_var, z], name='encoder')
+    z = Sampling()([z_mean, z_log_var])
+    encoder = models.Model(inputs, [z_mean, z_log_var, z], name="encoder")
     return encoder
 
-# 샘플링 함수 (Reparameterization trick)
-def sampling(args):
-    """잠재 공간에서 샘플링"""
-    z_mean, z_log_var = args
-    batch = tf.shape(z_mean)[0]
-    dim = tf.shape(z_mean)[1]
-    
-    epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
-    z = z_mean + tf.exp(0.5 * z_log_var) * epsilon
-    return z
-
-# VAE 디코더
 def build_decoder(latent_dim, output_shape):
-    """VAE 디코더 모델"""
     latent_inputs = layers.Input(shape=(latent_dim,))
-    
     x = layers.Dense(64)(latent_inputs)
-    x = layers.RepeatVector(SEQUENCE_LENGTH)(x)
+    seq_len = output_shape[0]
+    x = layers.RepeatVector(seq_len)(x)
     x = layers.LSTM(64, return_sequences=True)(x)
     x = layers.LSTM(128, return_sequences=True)(x)
-    
-    outputs = layers.TimeDistributed(layers.Dense(output_shape[1], activation='sigmoid'))(x)
-    
-    decoder = models.Model(latent_inputs, outputs, name='decoder')
+    # 출력은 float32로 캐스팅(혼합정밀도 안정성)
+    outputs = layers.TimeDistributed(
+        layers.Dense(output_shape[1], activation="sigmoid", dtype="float32")
+    )(x)
+    decoder = models.Model(latent_inputs, outputs, name="decoder")
     return decoder
 
-# 전체 VAE 모델
+def reconstruction_loss_fn(y_true, y_pred):
+    # 손실은 float32에서 계산
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    return tf.reduce_mean(tf.square(y_true - y_pred))
+
 def build_vae(input_shape, latent_dim):
-    """VAE 모델"""
     encoder = build_encoder(input_shape, latent_dim)
     decoder = build_decoder(latent_dim, input_shape)
 
-    # VAE 인코더와 디코더 연결
     inputs = layers.Input(shape=input_shape)
-    z_mean, z_log_var, z = encoder(inputs)
+    _, _, z = encoder(inputs)
     reconstructed = decoder(z)
 
-    # 손실 함수 정의 (재구성 손실 + KL 발산)
-    vae = models.Model(inputs, reconstructed, name='vae')
-
-    # VAE 손실 함수 정의
-    reconstruction_loss = tf.keras.ops.mean(tf.keras.ops.square(inputs - reconstructed))
-    kl_loss = -0.5 * tf.keras.ops.mean(tf.keras.ops.sum(1 + z_log_var - tf.keras.ops.square(z_mean) - tf.keras.ops.exp(z_log_var), axis=-1))
-    vae_loss = reconstruction_loss + kl_loss
-
-    vae.add_loss(vae_loss)
-    vae.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE))
-
+    vae = models.Model(inputs, reconstructed, name="vae")
+    vae.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
+        loss=reconstruction_loss_fn,        # KL은 Sampling 레이어에서 add_loss로 추가됨
+        jit_compile=True
+    )
     return vae, encoder, decoder
 
-# 학습 데이터 로드
-data = load_data(seq_length=SEQUENCE_LENGTH)  # 피아노 롤 데이터 로드
-input_shape = (SEQUENCE_LENGTH, 128)  # 시퀀스 길이, 피치 수
-
-# VAE 모델 생성
+# ======================================
+# 데이터 준비 & 모델 생성
+# ======================================
+data = load_data(seq_length=SEQUENCE_LENGTH)
+input_shape = (SEQUENCE_LENGTH, 128)
 vae, encoder, decoder = build_vae(input_shape, LATENT_DIM)
 
-# 학습 도중 출력할 샘플을 생성하는 콜백 함수
+# ======================================
+# 콜백
+# ======================================
 def generate_sample(epoch, logs):
-    """학습 중 중간 결과 생성"""
-    if epoch % 10 == 0:  # 10번째 에포크마다 출력
-        random_latent_vector = np.random.normal(size=(1, LATENT_DIM))  # 잠재 벡터 샘플링
-        generated_roll = decoder.predict(random_latent_vector)  # 디코더를 통해 음악 생성
-        
-        # 생성된 피아노 롤을 MIDI 파일로 변환하여 저장
-        #save_to_midi(generated_roll[0], f'generated_sample_epoch_{epoch}.mid')  # 출력 파일 저장
-        print(f"Generated sample at epoch {epoch} saved as MIDI")
+    if epoch % 10 == 0:
+        z = np.random.normal(size=(1, LATENT_DIM)).astype(np.float32)
+        generated_roll = decoder.predict(z, verbose=0)
+        # 필요 시 MIDI 저장 구현
+        print(f"[INFO] Generated sample at epoch {epoch} | shape={generated_roll.shape}")
 
-# 콜백 정의
 generate_sample_callback = LambdaCallback(on_epoch_end=generate_sample)
 
-# 모델 체크포인트 콜백 (모델 저장)
-checkpoint_callback = ModelCheckpoint('vae_model_checkpoint.h5', save_best_only=True, monitor='loss', mode='min')
+checkpoint_callback = ModelCheckpoint(
+    str(CHECKPOINT_PATH),
+    save_best_only=True,
+    save_weights_only=True,
+    monitor="loss", mode="min"
+)
 
-if __name__ == '__main__':
-    # 모델 학습
-    vae.fit(data, data, epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[checkpoint_callback, generate_sample_callback])
+# 재시작 시 체크포인트 로드
+if CHECKPOINT_PATH.exists():
+    print(f"[INFO] Load checkpoint weights: {CHECKPOINT_PATH}")
+    vae.load_weights(str(CHECKPOINT_PATH))
 
-    # 모델 저장
-    vae.save('vae_model.h5')
-    encoder.save('encoder_model.h5')
-    decoder.save('decoder_model.h5')
+# ======================================
+# 학습
+# ======================================
+if __name__ == "__main__":
+    vae.fit(
+        data, data,
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=[checkpoint_callback, generate_sample_callback],
+        verbose=1
+    )
 
-# 모델을 이용해 새로운 피아노 롤 생성하기
-def generate_music():
-    """생성된 음악 샘플"""
-    # 잠재 공간에서 샘플링
-    random_latent_vector = np.random.normal(size=(1, LATENT_DIM))
-    generated_roll = decoder.predict(random_latent_vector)
+    vae.save(str(VAE_SAVE_PATH))
+    encoder.save(str(ENC_SAVE_PATH))
+    decoder.save(str(DEC_SAVE_PATH))
 
-    # 생성된 피아노 롤을 MIDI로 변환 (여기서는 MIDI 변환 함수 필요)
-    # save_to_midi(generated_roll)
-    return generated_roll
+    print("[SAVED]")
+    print("  VAE     :", VAE_SAVE_PATH)
+    print("  Encoder :", ENC_SAVE_PATH)
+    print("  Decoder :", DEC_SAVE_PATH)
 
-# 생성된 음악 샘플 출력
-generated_music = generate_music()
-print(generated_music)
+    # 샘플 생성
+    def generate_music():
+        z = np.random.normal(size=(1, LATENT_DIM)).astype(np.float32)
+        return decoder.predict(z, verbose=0)
+
+    gen = generate_music()
+    print("sample shape/min/max:",
+          gen.shape, float(gen.min()), float(gen.max()))
