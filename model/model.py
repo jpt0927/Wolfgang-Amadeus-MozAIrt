@@ -5,6 +5,9 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import ModelCheckpoint, LambdaCallback
 import gc  # Garbage Collection 라이브러리
+from tensorflow.keras import mixed_precision
+
+mixed_precision.set_global_policy("mixed_float16")
 
 # 하이퍼파라미터
 TIME_RESOLUTION = 0.05  # 50ms 단위 (20 steps/sec)
