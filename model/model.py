@@ -20,18 +20,30 @@ if len(physical_devices) > 0:
     tf.config.set_visible_devices(physical_devices[0], 'GPU')  # 첫 번째 GPU 선택
     tf.config.experimental.set_memory_growth(physical_devices[0], True)  # 메모리 증가 설정
 
-# 피아노 롤 데이터 로딩
-def load_data(input_dir="data/processed/Classical"):
-    """피아노 롤 데이터 불러오기"""
+# 피아노 롤 데이터 로딩 (슬라이딩 윈도우 적용)
+def load_data(input_dir="data/processed/Classical", seq_length=200, step=100):
+    """피아노 롤 데이터를 불러와서 슬라이딩 윈도우로 시퀀스 생성"""
     files = [f for f in os.listdir(input_dir) if f.endswith(".npz")]
-    data = []
+    sequences = []
     
     for file in files:
         file_path = os.path.join(input_dir, file)
-        npz_file = np.load(file_path)
-        data.append(npz_file['roll'])
-    
-    return np.array(data)
+        try:
+            with np.load(file_path) as npz_file:
+                roll = npz_file['roll']
+                
+                # 시퀀스 길이보다 짧은 롤은 무시
+                if roll.shape[0] < seq_length:
+                    continue
+                    
+                # 슬라이딩 윈도우로 시퀀스 생성
+                for i in range(0, roll.shape[0] - seq_length + 1, step):
+                    seq = roll[i:i + seq_length]
+                    sequences.append(seq)
+        except Exception as e:
+            print(f"Error loading or processing file {file}: {e}")
+
+    return np.array(sequences)
 
 # VAE 인코더
 def build_encoder(input_shape, latent_dim):
@@ -92,8 +104,8 @@ def build_vae(input_shape, latent_dim):
     vae = models.Model(inputs, reconstructed, name='vae')
 
     # VAE 손실 함수 정의
-    reconstruction_loss = tf.reduce_mean(tf.square(inputs - reconstructed))
-    kl_loss = -0.5 * tf.reduce_mean(tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1))
+    reconstruction_loss = tf.keras.ops.mean(tf.keras.ops.square(inputs - reconstructed))
+    kl_loss = -0.5 * tf.keras.ops.mean(tf.keras.ops.sum(1 + z_log_var - tf.keras.ops.square(z_mean) - tf.keras.ops.exp(z_log_var), axis=-1))
     vae_loss = reconstruction_loss + kl_loss
 
     vae.add_loss(vae_loss)
@@ -102,7 +114,7 @@ def build_vae(input_shape, latent_dim):
     return vae, encoder, decoder
 
 # 학습 데이터 로드
-data = load_data()  # 피아노 롤 데이터 로드
+data = load_data(seq_length=SEQUENCE_LENGTH)  # 피아노 롤 데이터 로드
 input_shape = (SEQUENCE_LENGTH, 128)  # 시퀀스 길이, 피치 수
 
 # VAE 모델 생성
