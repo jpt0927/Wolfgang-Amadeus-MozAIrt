@@ -7,6 +7,14 @@ import Image from 'next/image';
 import LoadingAnimation from "@/components/LoadingAnimation";
 import TonePlayer from "@/components/TonePlayer"; // 새로 만든 TonePlayer를 import
 
+function decodeUnicode(str: string): string {
+  if (!str) return "";
+  // "\\uXXXX" 형태의 문자열을 찾아서 실제 문자로 변환합니다.
+  return str.replace(/\\u([0-9a-fA-F]{4})/g, (match, grp) => {
+    return String.fromCharCode(parseInt(grp, 16));
+  });
+}
+
 const loadingPhrases = [
   "악상을 펼치는 중...",
   "멜로디를 구성하는 중...",
@@ -23,11 +31,13 @@ const genreNames = [
   "Jazz & Blues",
   "RnB & Soul & Funk",
   "Rock & Pop",
+  "Fantastic"
 ];
 
 export default function HomePage() {
   const [isLoading, setIsLoading] = useState(false);
   const [prompt, setPrompt] = useState("");
+  const [title, setTitle] = useState("AI의 음악");
   const [musicUrl, setMusicUrl] = useState<string | null>(null);
   const [currentPhrase, setCurrentPhrase] = useState(loadingPhrases[0]);
 
@@ -49,15 +59,32 @@ export default function HomePage() {
     setMusicUrl(null);
     setIsLoading(true);
 
-    setTimeout(() => {
-      // --- 2. 시뮬레이션: 랜덤 장르 번호 설정 ---
-      // 실제로는 백엔드에서 받은 장르 번호를 여기에 설정합니다.
-      const randomGenre = Math.floor(Math.random() * 6);
-      setGenre(randomGenre);
+    try {
+      // ✅ fetch 요청 주소를 파이썬 서버의 전체 주소로 변경
+      const response = await fetch('http://127.0.0.1:8000/api/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prompt: prompt }),
+      });
 
-      setMusicUrl("https://bitmidi.com/uploads/14266.mid");
+      if (!response.ok) {
+        throw new Error('API 요청에 실패했습니다.');
+      }
+
+      const result = await response.json();
+      setGenre(result.genre);
+      setMusicUrl(result.musicUrl);
+      const decodedTitle = decodeUnicode(result.title)
+      setTitle(decodedTitle);
+      console.log(result);
+
+    } catch (error) {
+      console.error("음악 생성 실패:", error);
+    } finally {
       setIsLoading(false);
-    }, 5000);
+    }
   };
 
   return (
@@ -128,8 +155,8 @@ export default function HomePage() {
                 ) : (
                   musicUrl && (
                     <div className="w-full text-center">
-                      <h2 className="text-xl font-bold text-white mb-4">AI의 창작물</h2>
-                      <TonePlayer url={musicUrl} genre={genre}/>
+                      <h2 className="text-xl font-bold text-white mb-4">{title}</h2>
+                      <TonePlayer url={musicUrl} genre={genre} title={title}/>
                       <p className="text-sm text-gray-400 mt-3">
                         AI가 제안하는 장르: {genreNames[genre]}
                       </p>
