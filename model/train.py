@@ -8,7 +8,10 @@ if __name__ == "__main__":
         model.data, model.data,
         epochs=model.EPOCHS,
         batch_size=model.BATCH_SIZE,
-        callbacks=[model.checkpoint_callback, model.generate_sample_callback],
+        # callbacks=[model.checkpoint_callback, model.generate_sample_callback],
+        callbacks=[model.checkpoint_callback,
+                   model.generate_sample_callback,
+                   model.kl_sched], 
         verbose=1,
     )
 
