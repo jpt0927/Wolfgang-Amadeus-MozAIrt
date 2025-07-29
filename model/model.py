@@ -1,219 +1,131 @@
+# model.py - 변수 정의 순서 오류 수정 버전
 import os
-import json
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import ModelCheckpoint, LambdaCallback
+from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras import mixed_precision
 from pathlib import Path
+import pretty_midi
 
 # ======================================
-# 전역 설정
+# 전역 설정 및 하이퍼파라미터
 # ======================================
 mixed_precision.set_global_policy("mixed_float16")
-ROOT_DIR = Path(__file__).resolve().parents[1]
-from tensorflow.keras import mixed_precision
+try:
+    ROOT_DIR = Path(__file__).resolve().parents[1]
+except NameError:
+    ROOT_DIR = Path.cwd()
 
-mixed_precision.set_global_policy("mixed_float16")
-
-# 하이퍼파라미터
+# ✅ 모든 하이퍼파라미터를 함수 정의보다 먼저 선언합니다.
+MAX_SEQUENCE_LENGTH = 500
 TIME_RESOLUTION = 0.05
-LATENT_DIM = 32
-BATCH_SIZE = 64
-EPOCHS = 20
-LEARNING_RATE = 1e-3
-SEQUENCE_LENGTH = 200
+LATENT_DIM = 128
+BATCH_SIZE = 32
+EPOCHS = 200
+LEARNING_RATE = 1e-4
 
-# 데이터셋/출력 경로 태그
-DATASET_TAG = "Electronic_Dance_SynthPop"
-DATA_DIR = ROOT_DIR / "data" / "processed" / DATASET_TAG
-OUTPUT_DIR = ROOT_DIR / "outputs" / DATASET_TAG
+DATASET_TAG = "Classical"
+DATA_DIR = ROOT_DIR / "data" / "raw" / DATASET_TAG 
+OUTPUT_DIR = ROOT_DIR / "outputs" / f"{DATASET_TAG}_CNN_Padding_Midi"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# 파일 경로(이름)에 epochs 포함
 CHECKPOINT_PATH = OUTPUT_DIR / f"vae_{DATASET_TAG}_E{EPOCHS}.weights.h5"
-VAE_SAVE_PATH   = OUTPUT_DIR / f"vae_{DATASET_TAG}_E{EPOCHS}.h5"
-ENC_SAVE_PATH   = OUTPUT_DIR / f"encoder_{DATASET_TAG}_E{EPOCHS}.h5"
-DEC_SAVE_PATH   = OUTPUT_DIR / f"decoder_{DATASET_TAG}_E{EPOCHS}.h5"
+VAE_SAVE_PATH   = OUTPUT_DIR / f"vae_{DATASET_TAG}_E{EPOCHS}.keras"
+ENC_SAVE_PATH   = OUTPUT_DIR / f"encoder_{DATASET_TAG}_E{EPOCHS}.keras"
+DEC_SAVE_PATH   = OUTPUT_DIR / f"decoder_{DATASET_TAG}_E{EPOCHS}.keras"
 
 # ======================================
-# GPU 설정
+# 함수 정의
 # ======================================
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    tf.config.set_visible_devices(gpus[0], 'GPU')
-    tf.config.experimental.set_memory_growth(gpus[0], True)
+def set_gpu():
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            tf.config.set_visible_devices(gpus[0], 'GPU')
+            tf.config.experimental.set_memory_growth(gpus[0], True)
+        except RuntimeError as e:
+            print(e)
 
-# ======================================
-# 데이터 로딩 (슬라이딩 윈도우)
-# ======================================
-def load_data(input_dir=DATA_DIR, seq_length=SEQUENCE_LENGTH, step=100):
-    """
-    .npz 파일의 'roll' 배열(T,128)을 읽어 (N, seq_length, 128) 시퀀스 생성.
-    """
+def load_data(input_dir=DATA_DIR, max_len=MAX_SEQUENCE_LENGTH, time_res=TIME_RESOLUTION):
     input_dir = Path(input_dir)
-    if not input_dir.is_dir():
-        raise FileNotFoundError(f"Data directory not found: {input_dir}")
-
-    files = sorted(input_dir.glob("*.npz"))
-    if not files:
-        raise RuntimeError(f"No .npz files in {input_dir}")
-
-    sequences = []
+    if not input_dir.is_dir(): raise FileNotFoundError(f"Data directory not found: {input_dir}")
+    files = list(input_dir.glob("*.mid*"))
+    if not files: raise RuntimeError(f"No .mid or .midi files in {input_dir}")
+    
+    all_rolls = []
+    fs = 1 / time_res
+    
     for fp in files:
         try:
-            with np.load(fp) as npz_file:
-                if "roll" not in npz_file:
-                    print(f"[WARN] 'roll' key not found in {fp.name}, skip.")
-                    continue
-                roll = npz_file["roll"].astype(np.float32)
+            midi_data = pretty_midi.PrettyMIDI(str(fp))
+            roll = midi_data.get_piano_roll(fs=fs)
+            binarized_roll = (roll.T > 0).astype(np.float32)
+            all_rolls.append(binarized_roll)
+        except Exception as e: 
+            print(f"[WARN] Error processing {fp.name}: {e}")
 
-                if roll.ndim != 2 or roll.shape[1] != 128:
-                    print(f"[WARN] Unexpected roll shape {roll.shape} in {fp.name}, skip.")
-                    continue
+    if not all_rolls: raise RuntimeError(f"No valid data loaded from {input_dir}")
+    
+    padded_rolls = pad_sequences(
+        all_rolls, maxlen=max_len, padding='post', truncating='post', dtype='float32'
+    )
+    return np.expand_dims(padded_rolls, -1)
 
-                T = roll.shape[0]
-                if T < seq_length:
-                    continue
-
-                for i in range(0, T - seq_length + 1, step):
-                    sequences.append(roll[i:i + seq_length])
-
-        except Exception as e:
-            print(f"[WARN] Error reading {fp.name}: {e}")
-
-    if not sequences:
-        raise RuntimeError(
-            f"No sequences produced. Check seq_length={seq_length}, step={step}, and data in {input_dir}"
-        )
-
-    return np.stack(sequences, dtype=np.float32)
-
-# ======================================
-# VAE 구성요소
-# ======================================
 class Sampling(layers.Layer):
-    """Reparameterization + KL(add_loss)"""
     def call(self, inputs):
         z_mean, z_log_var = inputs
-        # 손실 안정성을 위해 float32에서 계산
-        zm32 = tf.cast(z_mean, tf.float32)
-        zv32 = tf.cast(z_log_var, tf.float32)
-        eps  = tf.random.normal(tf.shape(zm32), dtype=tf.float32)
-        z32  = zm32 + tf.exp(0.5 * zv32) * eps
-
-        # KL loss 추가
-        kl = -0.5 * tf.reduce_mean(
-            tf.reduce_sum(1.0 + zv32 - tf.square(zm32) - tf.exp(zv32), axis=-1)
-        )
+        zm32, zv32 = tf.cast(z_mean, tf.float32), tf.cast(z_log_var, tf.float32)
+        eps = tf.random.normal(tf.shape(zm32))
+        z32 = zm32 + tf.exp(0.5 * zv32) * eps
+        kl = -0.5 * tf.reduce_mean(tf.reduce_sum(1.0 + zv32 - tf.square(zm32) - tf.exp(zv32), axis=-1))
         self.add_loss(kl)
-
-        # 정책 dtype으로 캐스팅해 반환
         return tf.cast(z32, z_mean.dtype)
 
 def build_encoder(input_shape, latent_dim):
     inputs = layers.Input(shape=input_shape)
-    x = layers.LSTM(128, return_sequences=True)(inputs)
-    x = layers.LSTM(64)(x)
+    x = layers.Masking(mask_value=0.0)(inputs)
+    x = layers.Conv2D(64, (3, 3), activation="relu", padding="same", strides=(2, 2))(x)
+    x = layers.Conv2D(128, (3, 3), activation="relu", padding="same", strides=(2, 2))(x)
+    shape_before_flatten = tf.keras.backend.int_shape(x)[1:]
+    x = layers.Flatten()(x)
+    x = layers.Dense(256, activation="relu")(x)
     z_mean = layers.Dense(latent_dim)(x)
     z_log_var = layers.Dense(latent_dim)(x)
     z = Sampling()([z_mean, z_log_var])
     encoder = models.Model(inputs, [z_mean, z_log_var, z], name="encoder")
+    encoder.shape_before_flatten = shape_before_flatten 
     return encoder
 
-def build_decoder(latent_dim, output_shape):
+def build_decoder(latent_dim, shape_before_flatten):
     latent_inputs = layers.Input(shape=(latent_dim,))
-    x = layers.Dense(64)(latent_inputs)
-    seq_len = output_shape[0]
-    x = layers.RepeatVector(seq_len)(x)
-    x = layers.LSTM(64, return_sequences=True)(x)
-    x = layers.LSTM(128, return_sequences=True)(x)
-    # 출력은 float32로 캐스팅(혼합정밀도 안정성)
-    outputs = layers.TimeDistributed(
-        layers.Dense(output_shape[1], activation="sigmoid", dtype="float32")
-    )(x)
+    x = layers.Dense(np.prod(shape_before_flatten), activation="relu")(latent_inputs)
+    x = layers.Reshape(shape_before_flatten)(x)
+    x = layers.Conv2DTranspose(128, (3, 3), activation="relu", padding="same", strides=(2, 2))(x)
+    x = layers.Conv2DTranspose(64, (3, 3), activation="relu", padding="same", strides=(2, 2))(x)
+    outputs = layers.Conv2D(1, (3, 3), activation="sigmoid", padding="same", dtype="float32")(x)
     decoder = models.Model(latent_inputs, outputs, name="decoder")
     return decoder
 
 def reconstruction_loss_fn(y_true, y_pred):
-    # 손실은 float32에서 계산
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    return tf.reduce_mean(tf.square(y_true - y_pred))
+    y_true, y_pred = tf.cast(y_true, tf.float32), tf.cast(y_pred, tf.float32)
+    bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+    return tf.reduce_mean(tf.reduce_sum(bce, axis=[1, 2]))
 
-def build_vae(input_shape, latent_dim):
-    encoder = build_encoder(input_shape, latent_dim)
-    decoder = build_decoder(latent_dim, input_shape)
-
-    inputs = layers.Input(shape=input_shape)
-    _, _, z = encoder(inputs)
+def build_vae(encoder, decoder):
+    inputs = encoder.input
+    z_mean, z_log_var, z = encoder(inputs)
     reconstructed = decoder(z)
-
     vae = models.Model(inputs, reconstructed, name="vae")
     vae.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss=reconstruction_loss_fn,        # KL은 Sampling 레이어에서 add_loss로 추가됨
+        loss=reconstruction_loss_fn,
         jit_compile=True
     )
-    return vae, encoder, decoder
-
-# ======================================
-# 데이터 준비 & 모델 생성
-# ======================================
-data = load_data(seq_length=SEQUENCE_LENGTH)
-input_shape = (SEQUENCE_LENGTH, 128)
-vae, encoder, decoder = build_vae(input_shape, LATENT_DIM)
-
-# ======================================
-# 콜백
-# ======================================
-def generate_sample(epoch, logs):
-    if epoch % 10 == 0:
-        z = np.random.normal(size=(1, LATENT_DIM)).astype(np.float32)
-        generated_roll = decoder.predict(z, verbose=0)
-        # 필요 시 MIDI 저장 구현
-        print(f"[INFO] Generated sample at epoch {epoch} | shape={generated_roll.shape}")
-
-generate_sample_callback = LambdaCallback(on_epoch_end=generate_sample)
+    return vae
 
 checkpoint_callback = ModelCheckpoint(
-    str(CHECKPOINT_PATH),
-    save_best_only=True,
-    save_weights_only=True,
-    monitor="loss", mode="min"
+    str(CHECKPOINT_PATH), save_best_only=True,
+    save_weights_only=True, monitor="loss", mode="min"
 )
-
-# 재시작 시 체크포인트 로드
-# if CHECKPOINT_PATH.exists():
-#     print(f"[INFO] Load checkpoint weights: {CHECKPOINT_PATH}")
-#     vae.load_weights(str(CHECKPOINT_PATH))
-
-# ======================================
-# 학습
-# ======================================
-if __name__ == "__main__":
-    vae.fit(
-        data, data,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        callbacks=[checkpoint_callback, generate_sample_callback],
-        verbose=1
-    )
-
-    vae.save(str(VAE_SAVE_PATH))
-    encoder.save(str(ENC_SAVE_PATH))
-    decoder.save(str(DEC_SAVE_PATH))
-
-    print("[SAVED]")
-    print("  VAE     :", VAE_SAVE_PATH)
-    print("  Encoder :", ENC_SAVE_PATH)
-    print("  Decoder :", DEC_SAVE_PATH)
-
-    # 샘플 생성
-    def generate_music():
-        z = np.random.normal(size=(1, LATENT_DIM)).astype(np.float32)
-        return decoder.predict(z, verbose=0)
-
-    gen = generate_music()
-    print("sample shape/min/max:",
-          gen.shape, float(gen.min()), float(gen.max()))
