@@ -5,15 +5,8 @@ import { useState, useEffect, FormEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Image from 'next/image';
 import LoadingAnimation from "@/components/LoadingAnimation";
-import TonePlayer from "@/components/TonePlayer"; // 새로 만든 TonePlayer를 import
+import TonePlayer from "@/components/TonePlayer";
 
-function decodeUnicode(str: string): string {
-  if (!str) return "";
-  // "\\uXXXX" 형태의 문자열을 찾아서 실제 문자로 변환합니다.
-  return str.replace(/\\u([0-9a-fA-F]{4})/g, (match, grp) => {
-    return String.fromCharCode(parseInt(grp, 16));
-  });
-}
 
 const loadingPhrases = [
   "악상을 펼치는 중...",
@@ -40,7 +33,6 @@ export default function HomePage() {
   const [title, setTitle] = useState("AI의 음악");
   const [musicUrl, setMusicUrl] = useState<string | null>(null);
   const [currentPhrase, setCurrentPhrase] = useState(loadingPhrases[0]);
-
   const [genre, setGenre] = useState(1);
 
   useEffect(() => {
@@ -52,6 +44,7 @@ export default function HomePage() {
     }
   }, [isLoading]);
 
+  // ############ 여기가 핵심 수정 부분 ############
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!prompt || isLoading) return;
@@ -60,12 +53,9 @@ export default function HomePage() {
     setIsLoading(true);
 
     try {
-      // ✅ fetch 요청 주소를 파이썬 서버의 전체 주소로 변경
       const response = await fetch('http://127.0.0.1:8000/api/generate', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: prompt }),
       });
 
@@ -73,12 +63,27 @@ export default function HomePage() {
         throw new Error('API 요청에 실패했습니다.');
       }
 
-      const result = await response.json();
-      setGenre(result.genre);
-      setMusicUrl(result.musicUrl);
-      const decodedTitle = decodeUnicode(result.title)
-      setTitle(decodedTitle);
-      console.log(result);
+      // 1. 헤더에서 제목과 장르 정보 추출
+      const headerTitle = response.headers.get('X-Music-Title');
+      const headerGenre = response.headers.get('X-Music-Genre');
+
+      // 2. 응답 본문에서 MIDI 파일(blob) 데이터 추출
+      const blob = await response.blob();
+      
+      // 3. Blob 데이터로 브라우저에서만 사용 가능한 임시 URL 생성
+      const newMusicUrl = URL.createObjectURL(blob);
+      
+      // 4. 상태 업데이트
+      // 백엔드에서 URL 인코딩된 제목을 디코딩
+      setTitle(headerTitle ? decodeURIComponent(headerTitle) : "제목 없음");
+      setGenre(headerGenre ? parseInt(headerGenre, 10) : 1);
+      setMusicUrl(newMusicUrl);
+
+      console.log("음악 생성 완료:", {
+        title: headerTitle ? decodeURIComponent(headerTitle) : "제목 없음",
+        genre: headerGenre,
+        musicUrl: newMusicUrl
+      });
 
     } catch (error) {
       console.error("음악 생성 실패:", error);
@@ -86,20 +91,22 @@ export default function HomePage() {
       setIsLoading(false);
     }
   };
+  // ############ 여기까지 핵심 수정 부분 ############
 
+  // 컴포넌트의 return 부분은 수정할 필요 없습니다.
   return (
     <main className="flex min-h-screen w-full items-center justify-center p-4">
       <div className="w-full max-w-md" id="interactive-area">
       <div className="w-full max-w-md">
-        {/* 상단 카드는 수정 없음 */}
+        {/* 상단 카드 */}
         <div className="bg-white/10 backdrop-blur-md rounded-xl shadow-lg p-8 border border-white/10">
         <div className="flex items-center gap-4 mb-4">
           <Image
-              src="/music-icon.png" // public 폴더의 이미지 경로
+              src="/music-icon.png"
               alt="음악 아이콘"
-              width={60} // 아이콘 크기 (글자 높이와 비슷하게)
+              width={60}
               height={60}
-              className="flex-shrink-0 rounded-md relative -top-2" // 창이 줄어들어도 아이콘이 찌그러지지 않도록 설정
+              className="flex-shrink-0 rounded-md relative -top-2"
             />
           <h1 className="text-2xl font-bold text-white leading-snug mb-4">
             어떤 분위기의 음악을<br />만들어 드릴까요?

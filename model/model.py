@@ -26,6 +26,9 @@ random.seed(42)
 
 mixed_precision.set_global_policy("mixed_float16")
 ROOT_DIR = Path(__file__).resolve().parents[1]
+from tensorflow.keras import mixed_precision
+
+mixed_precision.set_global_policy("mixed_float16")
 
 # =========================================================
 # 하이퍼파라미터
