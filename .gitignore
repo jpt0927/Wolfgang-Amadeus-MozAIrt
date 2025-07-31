@@ -4,6 +4,8 @@ my_new_env/
 
 data/
 
+outputs/
+
 # OS 및 시스템 파일
 .DS_Store
 Thumbs.db
