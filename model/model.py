@@ -1,4 +1,4 @@
-# model.py - 변수 정의 순서 오류 수정 버전
+# model.py
 import os
 import numpy as np
 import tensorflow as tf
@@ -18,16 +18,15 @@ try:
 except NameError:
     ROOT_DIR = Path.cwd()
 
-# ✅ 모든 하이퍼파라미터를 함수 정의보다 먼저 선언합니다.
 MAX_SEQUENCE_LENGTH = 500
 TIME_RESOLUTION = 0.05
 LATENT_DIM = 128
-BATCH_SIZE = 32
-EPOCHS = 200
-LEARNING_RATE = 1e-4
+BATCH_SIZE = 64
+EPOCHS = 1000
+LEARNING_RATE = 1e-5
 
 DATASET_TAG = "Classical"
-DATA_DIR = ROOT_DIR / "data" / "raw" / DATASET_TAG 
+DATA_DIR = ROOT_DIR / "data" / "raw" / DATASET_TAG
 OUTPUT_DIR = ROOT_DIR / "outputs" / f"{DATASET_TAG}_CNN_Padding_Midi"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -48,40 +47,57 @@ def set_gpu():
         except RuntimeError as e:
             print(e)
 
-def load_data(input_dir=DATA_DIR, max_len=MAX_SEQUENCE_LENGTH, time_res=TIME_RESOLUTION):
-    input_dir = Path(input_dir)
-    if not input_dir.is_dir(): raise FileNotFoundError(f"Data directory not found: {input_dir}")
-    files = list(input_dir.glob("*.mid*"))
-    if not files: raise RuntimeError(f"No .mid or .midi files in {input_dir}")
-    
-    all_rolls = []
-    fs = 1 / time_res
-    
-    for fp in files:
-        try:
-            midi_data = pretty_midi.PrettyMIDI(str(fp))
-            roll = midi_data.get_piano_roll(fs=fs)
-            binarized_roll = (roll.T > 0).astype(np.float32)
-            all_rolls.append(binarized_roll)
-        except Exception as e: 
-            print(f"[WARN] Error processing {fp.name}: {e}")
-
-    if not all_rolls: raise RuntimeError(f"No valid data loaded from {input_dir}")
-    
-    padded_rolls = pad_sequences(
-        all_rolls, maxlen=max_len, padding='post', truncating='post', dtype='float32'
-    )
-    return np.expand_dims(padded_rolls, -1)
-
 class Sampling(layers.Layer):
+    """Reparameterization trick."""
     def call(self, inputs):
         z_mean, z_log_var = inputs
         zm32, zv32 = tf.cast(z_mean, tf.float32), tf.cast(z_log_var, tf.float32)
         eps = tf.random.normal(tf.shape(zm32))
         z32 = zm32 + tf.exp(0.5 * zv32) * eps
-        kl = -0.5 * tf.reduce_mean(tf.reduce_sum(1.0 + zv32 - tf.square(zm32) - tf.exp(zv32), axis=-1))
-        self.add_loss(kl)
         return tf.cast(z32, z_mean.dtype)
+
+class VAE(models.Model):
+    def __init__(self, encoder, decoder, **kwargs):
+        super(VAE, self).__init__(**kwargs)
+        self.encoder = encoder
+        self.decoder = decoder
+        self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
+        self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="reconstruction_loss")
+        self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
+
+    @property
+    def metrics(self):
+        return [self.total_loss_tracker, self.reconstruction_loss_tracker, self.kl_loss_tracker]
+
+    def train_step(self, data):
+        # ✅ 이 부분이 핵심 수정 사항입니다.
+        x, y = data # 데이터를 입력(x)과 정답(y)으로 분리
+        with tf.GradientTape() as tape:
+            z_mean, z_log_var, z = self.encoder(x) # 인코더에는 입력(x)만 전달
+            reconstruction = self.decoder(z)
+            
+            y_true = tf.cast(y, tf.float32)
+            y_pred = tf.cast(reconstruction, tf.float32)
+            epsilon = 1e-7
+            y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+            bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+            reconstruction_loss = tf.reduce_mean(tf.reduce_sum(bce, axis=[1, 2]))
+            
+            z_mean_f32 = tf.cast(z_mean, tf.float32)
+            z_log_var_f32 = tf.cast(z_log_var, tf.float32)
+            kl_loss = -0.5 * (1 + z_log_var_f32 - tf.square(z_mean_f32) - tf.exp(z_log_var_f32))
+            kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
+            
+            total_loss = reconstruction_loss + kl_loss
+            
+        grads = tape.gradient(total_loss, self.trainable_weights)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+        
+        self.total_loss_tracker.update_state(total_loss)
+        self.reconstruction_loss_tracker.update_state(reconstruction_loss)
+        self.kl_loss_tracker.update_state(kl_loss)
+        
+        return {m.name: m.result() for m in self.metrics}
 
 def build_encoder(input_shape, latent_dim):
     inputs = layers.Input(shape=input_shape)
@@ -108,24 +124,13 @@ def build_decoder(latent_dim, shape_before_flatten):
     decoder = models.Model(latent_inputs, outputs, name="decoder")
     return decoder
 
-def reconstruction_loss_fn(y_true, y_pred):
-    y_true, y_pred = tf.cast(y_true, tf.float32), tf.cast(y_pred, tf.float32)
-    bce = tf.keras.losses.binary_crossentropy(y_true, y_pred)
-    return tf.reduce_mean(tf.reduce_sum(bce, axis=[1, 2]))
-
-def build_vae(encoder, decoder):
-    inputs = encoder.input
-    z_mean, z_log_var, z = encoder(inputs)
-    reconstructed = decoder(z)
-    vae = models.Model(inputs, reconstructed, name="vae")
-    vae.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss=reconstruction_loss_fn,
-        jit_compile=True
-    )
+def build_and_compile_vae(encoder, decoder):
+    vae = VAE(encoder, decoder)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE, clipnorm=1.0)
+    vae.compile(optimizer=optimizer)
     return vae
 
 checkpoint_callback = ModelCheckpoint(
     str(CHECKPOINT_PATH), save_best_only=True,
-    save_weights_only=True, monitor="loss", mode="min"
+    save_weights_only=True, monitor="total_loss", mode="min"
 )
