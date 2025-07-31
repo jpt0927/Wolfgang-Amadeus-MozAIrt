@@ -36,6 +36,7 @@ pip install tensorflow-gpu==2.11
 ```
 
 ## 학습
+<img width="1897" height="764" alt="Image" src="https://github.com/user-attachments/assets/ae32a940-68fa-4d6b-8888-8ebe2620a400" />
 ### 데이터셋
 
 데이터셋은 피아노 롤 형식으로 classic, country, EDM, Jazz, RnB, Rock_Pop 음악을 표현한 것입니다. 피아노 롤은 128개의 피치에 대해 시간별로 키가 눌려졌는지 여부를 나타내는 이진 행렬입니다.
@@ -58,3 +59,7 @@ pip install tensorflow-gpu==2.11
 KL 발산: 잠재 공간 분포가 표준 정규 분포와 얼마나 차이가 나는지 측정합니다.
 
 학습: 모델은 1000 에포크 동안 학습하며, 이 과정에서 VAE 손실 함수를 최적화합니다.
+
+
+## 기술 스택
+<img width="1874" height="817" alt="Image" src="https://github.com/user-attachments/assets/6e108a6b-1352-43b2-b083-a3a0befd5679" />
